@@ -1,0 +1,3 @@
+# ninja log v5
+0	10743	1721901525521073239	/high_perf_store/l3_deep/xulongfei/Topo2D/projects/mmdet3d_plugin/topo2d/modules/ops/geometric_kernel_attn/build/temp.linux-x86_64-cpython-38/high_perf_store/l3_deep/xulongfei/Topo2D/projects/mmdet3d_plugin/topo2d/modules/ops/geometric_kernel_attn/src/geometric_kernel_attn_cuda.o	418ece302198ae91
+1	18197	1721901532969837620	/high_perf_store/l3_deep/xulongfei/Topo2D/projects/mmdet3d_plugin/topo2d/modules/ops/geometric_kernel_attn/build/temp.linux-x86_64-cpython-38/high_perf_store/l3_deep/xulongfei/Topo2D/projects/mmdet3d_plugin/topo2d/modules/ops/geometric_kernel_attn/src/version.o	a93a5c16b093905c
