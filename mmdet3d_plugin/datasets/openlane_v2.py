@@ -429,7 +429,8 @@ class OpenLaneV2SubsetADataset(Custom3DDataset):
         trans = []
         cam2imgs = []
         camera_extrinsics = []
-        homography_matrixes = [] 
+        homography_matrixes = []
+        cam2ego_rts = []
         for i, camera in enumerate(frame.get_camera_list()):
 
             assert camera == 'ring_front_center' if i == 0 else True, \
@@ -449,6 +450,8 @@ class OpenLaneV2SubsetADataset(Custom3DDataset):
             camera_extrinsic = np.eye(4)
             camera_extrinsic[:3,:3] = extrinsic['rotation']
             camera_extrinsic[:3,3] = extrinsic['translation']
+
+            cam2ego_rts.append(np.matrix(lidar2cam_rt.T).I)
 
             homography_matrix = np.eye(4)
             homography_matrix[:3,:3] = viewpad[:3, :3] @ lidar2cam_rt.T[0:3,[0,1,3]]
@@ -477,6 +480,7 @@ class OpenLaneV2SubsetADataset(Custom3DDataset):
         lidar2global[:3, :3] = np.array(frame.get_pose()['rotation'])
         lidar2global[:3, 3] = np.array(frame.get_pose()['translation'])
         global2lidar = np.linalg.inv(lidar2global)
+        lidar2ego = np.eye(4).astype(np.float32)
         input_dict = {
             'scene_token': segment_id,
             'sample_idx': timestamp,
@@ -491,7 +495,9 @@ class OpenLaneV2SubsetADataset(Custom3DDataset):
             'ego_pose': lidar2global,
             'ego_pose_inv': global2lidar,
             'cam_extrinsic': camera_extrinsics,
-            'homography_matrix': homography_matrixes
+            'homography_matrix': homography_matrixes,
+            'camera2ego': cam2ego_rts,
+            'lidar2ego': lidar2ego,
         }
 
         input_dict.update(self.get_ann_info(index, input_dict))

@@ -623,7 +623,7 @@ class Topo2DHead2D(DETRHead):
         if self.sync_cls_avg_factor:
             cls_avg_factor = reduce_mean(
                 cls_scores.new_tensor([cls_avg_factor]))
-
+        # breakpoint()
         cls_avg_factor = max(cls_avg_factor, 1)
         # from IPython import embed; embed()
         loss_cls = self.loss_cls(
@@ -748,7 +748,7 @@ class Topo2DHead2D(DETRHead):
         
         # assert openlanev2 dataset
         num_dec_layers, bs, num_vec, num_cls = all_cls_scores.shape
-        assert bs == 7
+        # assert bs == 7
         assert num_cls == 1
 
         # one2one

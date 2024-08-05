@@ -119,7 +119,7 @@ class SpatialCrossAttention(BaseModule):
         Returns:
              Tensor: forwarded results with shape [num_query, bs, embed_dims].
         """
-        breakpoint()
+
         if key is None:
             key = query
         if value is None:
@@ -314,7 +314,7 @@ class MSDeformableAttention3D(BaseModule):
         Returns:
              Tensor: forwarded results with shape [num_query, bs, embed_dims].
         """
-
+        # breakpoint()
         if value is None:
             value = query
         if identity is None:

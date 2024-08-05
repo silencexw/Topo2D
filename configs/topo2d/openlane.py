@@ -15,8 +15,10 @@ img_norm_cfg = dict(
     std = [58.395, 57.12, 57.375], 
     to_rgb = True)
 
-num_vec = 20
-topk_vec = 10
+one2many = True
+
+num_vec = 20 * 4 if one2many else 20
+topk_vec = 10 * 4 if one2many else 10
 fixed_ptsnum_per_line = 21
 
 map_classes = ['lane']
@@ -79,6 +81,9 @@ model = dict(
         type='Topo2DHead2DLane',
         num_query=num_vec,
         num_vec=num_vec,
+        num_lanes_one2one=num_vec // 4 if one2many else num_vec,
+        k_one2many=3,
+        lambda_one2many=1.0,
         num_pts_per_vec=fixed_ptsnum_per_line,
         num_pts_per_gt_vec=fixed_ptsnum_per_line,
         query_embed_type='instance_pts',
@@ -206,6 +211,9 @@ model = dict(
         num_classes=20,
         in_channels=_dim_,
         num_query=topk_vec,
+        num_lanes_one2one=topk_vec // 4 if one2many else topk_vec,
+        k_one2many=3,
+        lambda_one2many=1.0,
         num_pts_per_vec=fixed_ptsnum_per_line,
         num_pts_per_gt_vec=fixed_ptsnum_per_line,
         LID=True,

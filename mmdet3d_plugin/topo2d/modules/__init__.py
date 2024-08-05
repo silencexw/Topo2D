@@ -7,4 +7,5 @@ from .ms2one import build_ms2one, Naive, DilateNaive
 from .attn import FlashMHA
 from .transformer_maptr_bev import MapTRPerceptionTransformer
 from .maptr_decoder import MapTRDecoder
+from .lss_encoder import LSSTransform
 from .geometry_kernel_attention import GeometrySptialCrossAttention, GeometryKernelAttention

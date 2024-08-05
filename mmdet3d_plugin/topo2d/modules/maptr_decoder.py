@@ -55,18 +55,18 @@ class MapTRDecoder(TransformerLayerSequence):
                 *args,
                 reference_points=reference_points_input,
                 key_padding_mask=key_padding_mask,
-                # attn_masks=attn_masks,
+                attn_masks=attn_masks,
                 **kwargs)
             output = output.permute(1, 0, 2)
 
             if reg_branches is not None:
                 tmp = reg_branches[lid](output)
+                # breakpoint()
 
-                assert reference_points.shape[-1] == 2
+                # assert reference_points.shape[-1] == 2
 
                 new_reference_points = torch.zeros_like(reference_points)
-                new_reference_points[..., :2] = tmp[
-                    ..., :2] + inverse_sigmoid(reference_points[..., :2])
+                new_reference_points = tmp + inverse_sigmoid(reference_points)
                 # new_reference_points[..., 2:3] = tmp[
                 #     ..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
 

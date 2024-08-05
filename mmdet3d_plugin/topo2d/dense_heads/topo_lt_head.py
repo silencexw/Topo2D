@@ -96,12 +96,14 @@ class TopoLTHead(nn.Module):
         # feats: [D, B, num_query, num_embedding]
         o1_embeds = o1_feats[-1].clone()
         o2_embeds = o2_feats[-1].clone()
-        o1_feat_2d = o1_feats_2d[-1] # .clone()
+        if self.add_2d_query:
+            o1_feat_2d = o1_feats_2d[-1] # .clone()
 
         if self.is_detach:
             o1_embeds = o1_embeds.detach()
             o2_embeds = o2_embeds.detach()
-            o1_feat_2d = o1_feat_2d.detach()
+            if self.add_2d_query:
+                o1_feat_2d = o1_feat_2d.detach()
 
         B, _, dim = o1_embeds.shape
         o1_embeds = o1_embeds.view(B, -1, self.num_pts_per_vec, dim).mean(2) # B, vec, embed

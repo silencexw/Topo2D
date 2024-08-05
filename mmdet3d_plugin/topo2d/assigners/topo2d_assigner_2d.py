@@ -194,7 +194,8 @@ class Topo2DAssigner2D(BaseAssigner):
             from mmcv.runner import get_dist_info
             rank, _ = get_dist_info()
             if rank == 0:
-                import pdb; pdb.set_trace()
+                # import pdb; pdb.set_trace()
+                print(f'cost: {cost}')
                 print(torch.nonzero(torch.isnan(cost)))
         matched_row_inds = torch.from_numpy(matched_row_inds).to(
             bbox_pred.device)

@@ -621,6 +621,13 @@ class CustomLoadRandomScaleImageMultiViewImage(object):
         rand_ind = np.random.permutation(range(len(self.scales)))[0]
         rand_scale = self.scales[rand_ind]
 
+        scale_factor = np.eye(4)
+        scale_factor[0, 0] *= rand_scale
+        scale_factor[1, 1] *= rand_scale
+
+        img_aug_matrix = [scale_factor for _ in results['lidar2img']]
+        results['img_aug_matrix'] = img_aug_matrix
+
         y_size = [int(img.shape[0] * rand_scale) for img in results['img']]
         x_size = [int(img.shape[1] * rand_scale) for img in results['img']]
         results['img'] = [mmcv.imresize(img, (x_size[idx], y_size[idx]), return_scale=False) for idx, img in

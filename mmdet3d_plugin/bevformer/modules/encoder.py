@@ -178,6 +178,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
                 return_intermediate is `False`, otherwise it has shape
                 [num_layers, num_query, bs, embed_dims].
         """
+        # breakpoint()
         output = bev_query
         intermediate = []
 
@@ -331,7 +332,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
         Returns:
             Tensor: forwarded results with shape [num_queries, bs, embed_dims].
         """
-        breakpoint()
+        # breakpoint()
         norm_index = 0
         attn_index = 0
         ffn_index = 0
@@ -394,6 +395,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                     **kwargs)
                 attn_index += 1
                 identity = query
+                pass
 
             elif layer == 'ffn':
                 query = self.ffns[ffn_index](

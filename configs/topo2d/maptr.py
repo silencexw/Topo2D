@@ -2,9 +2,8 @@ plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
 
 point_cloud_range = [-50.0, -25.0, -3.0, 50.0, 25.0, 2.0]
+point_cloud_range_bev = [-25.0, -50.0, -3.0, 25.0, 50.0, 2.0]
 position_range = [-50.0, -50.0, -10.0, 50.0, 50.0, 10.0]
-voxel_size = [0.25, 0.25, 5.0]
-dbound=[1.0, 35.0, 0.5]
 
 img_size = (2048, 1600) # W, H
 input_size = (1024, 800) # W, H
@@ -44,10 +43,8 @@ _dim_ = 256
 _pos_dim_ = _dim_ // 2
 _ffn_dim_ = _dim_ * 2
 
-bev_h_ = 100
-bev_w_ = 200
-
-# find_unused_parameters=True
+bev_h_ = 200
+bev_w_ = 100
 
 # for 2d lane detection
 sample_method = '2d' # sample in 3d or 2d
@@ -55,10 +52,10 @@ reg_sigmoid = True # add sigmoid to ref pts
 output_vis = False # vis score and out of fov mask
 
 model = dict(
-    type='Topo2D',
+    type='MapTR',
     use_grid_mask=True,
     pretrained=dict(img='ckpts/resnet50-19c8e357.pth'),
-    only_2d=False,
+    only_2d=True,
     pc_range=point_cloud_range,
     position_range=position_range,
     fusion_method='query',
@@ -89,125 +86,8 @@ model = dict(
         add_extra_convs='on_output',
         num_outs=4,
         relu_before_extra_convs=True),
-    pts_bbox_head=dict(
-        type='Topo2DHead2D',
-        num_query=num_vec_per_image,
-        num_vec=num_vec_per_image,
-        num_lanes_one2one=num_vec_per_image // 4 if one2many else num_vec_per_image,
-        k_one2many=3 if one2many else 0,
-        lambda_one2many=1.0,
-        num_pts_per_vec=fixed_ptsnum_per_line,
-        num_pts_per_gt_vec=fixed_ptsnum_per_line,
-        query_embed_type='instance_pts',
-        num_classes=num_map_classes,
-        in_channels=_dim_,
-        sync_cls_avg_factor=True,
-        with_box_refine=True,
-        code_size=2,
-        code_weights=[1.0, 1.0, 1.0, 1.0],
-        org_img_size=img_size,
-        reg_sigmoid=reg_sigmoid,
-        output_vis=output_vis,
-        transformer=dict(
-            type='MapTRTransformer2DMlvl',
-            num_feature_levels=4,
-            # only decoder
-            encoder=dict(
-                type='DetrTransformerEncoder',
-                num_layers=6,
-                transformerlayers=dict(
-                    type='BaseTransformerLayer',
-                    attn_cfgs=dict(
-                        type='MultiScaleDeformableAttention', 
-                        embed_dims=_dim_,
-                    ),
-                    ffn_cfgs=dict(
-                        type='FFN',
-                        embed_dims=_dim_,
-                        feedforward_channels=512,
-                        num_fcs=2,
-                        ffn_drop=0.1,
-                        act_cfg=dict(type='ReLU', inplace=True),
-                    ),
-                    operation_order=('self_attn', 'norm', 'ffn', 'norm'))),
-            decoder=dict(
-                type='MapTRDecoder2D',
-                num_layers=6,
-                return_intermediate=True,
-                reg_sigmoid=reg_sigmoid,
-                transformerlayers=dict(
-                    type='DetrTransformerDecoderLayer',
-                    attn_cfgs=[
-                        dict(
-                            type='MultiheadAttention',
-                            embed_dims=_dim_,
-                            num_heads=8,
-                            dropout=0.1),
-                         dict(
-                            type='CustomMSDeformableAttention',
-                            embed_dims=_dim_,
-                            num_levels=4),
-                    ],
-                    feedforward_channels=_ffn_dim_,
-                    ffn_dropout=0.1,
-                    operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
-                                     'ffn', 'norm')))),
-        bbox_coder=dict(
-            type='Topo2DCoder2D',
-            post_center_range=[-img_size[0], -img_size[1], 0, 0, 
-                               img_size[0], img_size[1], img_size[0] * 2, img_size[1] * 2],
-            pc_range=point_cloud_range,
-            org_img_size=img_size,
-            max_num=num_vec_per_image // 4 if one2many else num_vec_per_image,
-            num_classes=num_map_classes),
-        positional_encoding=dict(
-            type='SinePositionalEncoding',
-            num_feats=128,
-            normalize=True,
-            offset=-0.5),
-        loss_cls=dict(
-            type='FocalLoss',
-            use_sigmoid=True,
-            gamma=2.0,
-            alpha=0.25,
-            loss_weight=2.0),
-        loss_vis=dict(
-            type="CrossEntropyLoss", 
-            use_sigmoid=True, 
-            loss_weight=2.0, 
-            class_weight=1.0
-        ),
-        loss_pts=dict(type='PtsL1Loss', loss_weight=5.0),
-        loss_dir=dict(type='PtsDirCosLoss', loss_weight=0.005),
-        loss_bbox=dict(type='L1Loss', loss_weight=0.0),
-        loss_iou=dict(type='GIoULoss', loss_weight=0.0)),
-    train_cfg=dict(pts=dict(
-            grid_size=[512, 512, 1],
-            point_cloud_range=point_cloud_range,
-            out_size_factor=4,
-            assigner=dict(
-                type='Topo2DAssigner2D',
-                cls_cost=dict(type='FocalLossCost', weight=2.0),
-                pts_cost=dict(type='OrderedPtsL1CostInFOV', weight=5, mask=output_vis),
-                reg_cost=dict(type='BBoxL1Cost', weight=0.0, box_format='xywh'),
-                iou_cost=dict(type='IoUCost', iou_mode='giou', weight=0.0),
-                pc_range=point_cloud_range,
-                org_img_size=img_size))),
-    learn_3d_query=False,
-    mask_head=False,
-    query_generator=dict(
-        in_channels=256,
-        num_fcs=1,
-        fc_out_channels=1024,
-        img_size=img_size,
-        extra_encoding=dict(
-            num_layers=2,
-            feat_channels=[512, 256],
-            features=[dict(type='intrinsic', in_channels=16,)]
-        ),
-    ),
     pts_bbox_head_3d=dict(
-        type='Topo2DHead3DBEV',
+        type='MapTRHead',
         bev_h=bev_h_,
         bev_w=bev_w_,
         num_classes=1,
@@ -238,7 +118,7 @@ model = dict(
             encoder=dict(
                 type='BEVFormerEncoder',
                 num_layers=1,
-                pc_range=point_cloud_range,
+                pc_range=point_cloud_range_bev,
                 num_points_in_pillar=4,
                 return_intermediate=False,
                 transformerlayers=dict(
@@ -247,11 +127,11 @@ model = dict(
                         dict(
                             type='TemporalSelfAttention',
                             embed_dims=_dim_,
-                            num_levels=1),
+                            num_levels=4),
                         dict(
                             type='SpatialCrossAttention',
-                            pc_range=point_cloud_range,
                             num_cams=7,
+                            pc_range=point_cloud_range_bev,
                             deformable_attention=dict(
                                 type='MSDeformableAttention3D',
                                 embed_dims=_dim_,
@@ -327,7 +207,10 @@ model = dict(
                 reg_cost=dict(type='BBoxL1Cost', weight=0.0, box_format='xywh'),
                 iou_cost=dict(type='IoUCost', iou_mode='giou', weight=0.0),
                 pc_range=point_cloud_range)),
-        test_cfg=None),
+        test_cfg=None
+    ),
+    learn_3d_query=False,
+    mask_head=False,
     te_head=dict(
         type='TrafficHead',
         num_query=100,
@@ -407,7 +290,6 @@ model = dict(
         in_channels_o1=_dim_,
         in_channels_o2=_dim_,
         shared_param=False,
-        # add_2d_query=True,
         loss_rel=dict(
             type='FocalLoss',
             use_sigmoid=True,
@@ -423,7 +305,6 @@ model = dict(
         in_channels_o1=_dim_,
         in_channels_o2=_dim_,
         shared_param=False,
-        # add_2d_query=True,
         loss_rel=dict(
             type='FocalLoss',
             use_sigmoid=True,
@@ -461,7 +342,7 @@ train_pipeline = [
         meta_keys=[
             'scene_token', 'sample_idx', 'img_paths', 
             'img_shape', 'scale_factor', 'pad_shape',
-            'lidar2img', 'can_bus', 'ori_shape', 'cam_intrinsic', 'camera2ego', 'lidar2ego', 'img_aug_matrix'
+            'lidar2img', 'can_bus', 'ori_shape'
         ],
     )
 ]
@@ -485,13 +366,13 @@ test_pipeline = [
         meta_keys=[
             'scene_token', 'sample_idx', 'img_paths', 
             'img_shape', 'scale_factor', 'pad_shape',
-            'lidar2img', 'can_bus', 'ori_shape', 'cam_intrinsic', 'camera2ego', 'lidar2ego', 'img_aug_matrix'
+            'lidar2img', 'can_bus', 'ori_shape',
         ],
     )
 ]
 
 data = dict(
-    samples_per_gpu=1,
+    samples_per_gpu=2,
     workers_per_gpu=2,
     train=dict(
         type=dataset_type,
@@ -534,7 +415,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=2e-4, # bs 8
+    lr=3e-4, # bs 8
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1),
@@ -567,4 +448,4 @@ log_level = 'INFO'
 workflow = [('train', 1)]
 load_from = None
 resume_from = None
-work_dir = './work_dirs/openlanev2_bev_bevformer_fp32'
+work_dir = './work_dirs/maptr'

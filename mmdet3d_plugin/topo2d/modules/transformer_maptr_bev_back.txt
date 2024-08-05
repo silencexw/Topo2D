@@ -85,20 +85,19 @@ class MapTRPerceptionTransformer(BaseModule):
 
     def init_layers(self):
         """Initialize layers of the Detr3DTransformer."""
-        if self.use_attn_bev:
-            self.level_embeds = nn.Parameter(torch.Tensor(
-                self.num_feature_levels, self.embed_dims))
-            self.cams_embeds = nn.Parameter(
-                torch.Tensor(self.num_cams, self.embed_dims))
-            # self.reference_points = nn.Linear(self.embed_dims, 3) # TODO, this is a hack
-            self.can_bus_mlp = nn.Sequential(
-                nn.Linear(self.len_can_bus, self.embed_dims // 2),
-                nn.ReLU(inplace=True),
-                nn.Linear(self.embed_dims // 2, self.embed_dims),
-                nn.ReLU(inplace=True),
-            )
-            if self.can_bus_norm:
-                self.can_bus_mlp.add_module('norm', nn.LayerNorm(self.embed_dims))
+        self.level_embeds = nn.Parameter(torch.Tensor(
+            self.num_feature_levels, self.embed_dims))
+        self.cams_embeds = nn.Parameter(
+            torch.Tensor(self.num_cams, self.embed_dims))
+        self.reference_points = nn.Linear(self.embed_dims, 3) # TODO, this is a hack
+        self.can_bus_mlp = nn.Sequential(
+            nn.Linear(self.len_can_bus, self.embed_dims // 2),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.embed_dims // 2, self.embed_dims),
+            nn.ReLU(inplace=True),
+        )
+        if self.can_bus_norm:
+            self.can_bus_mlp.add_module('norm', nn.LayerNorm(self.embed_dims))
 
     def init_weights(self):
         """Initialize the transformer weights."""
@@ -112,11 +111,10 @@ class MapTRPerceptionTransformer(BaseModule):
                     m.init_weight()
                 except AttributeError:
                     m.init_weights()
-        if self.use_attn_bev:
-            normal_(self.level_embeds)
-            normal_(self.cams_embeds)
-            # xavier_init(self.reference_points, distribution='uniform', bias=0.)
-            xavier_init(self.can_bus_mlp, distribution='uniform', bias=0.)
+        normal_(self.level_embeds)
+        normal_(self.cams_embeds)
+        xavier_init(self.reference_points, distribution='uniform', bias=0.)
+        xavier_init(self.can_bus_mlp, distribution='uniform', bias=0.)
     # TODO apply fp16 to this module cause grad_norm NAN
     # @auto_fp16(apply_to=('mlvl_feats', 'bev_queries', 'prev_bev', 'bev_pos'), out_fp32=True)
     def attn_bev_encode(
@@ -217,9 +215,8 @@ class MapTRPerceptionTransformer(BaseModule):
             mlvl_feats,
             prev_bev=None,
             **kwargs):
-        # assert len(mlvl_feats) == 1, 'Currently we only support single level feat in LSS'
-        # breakpoint()
-        images = mlvl_feats[-1]
+        assert len(mlvl_feats) == 1, 'Currently we only support single level feat in LSS'
+        images = mlvl_feats[0]
         img_metas = kwargs['img_metas']
         bev_embed = self.encoder(images,img_metas)
         bs, c, _,_ = bev_embed.shape
@@ -253,7 +250,7 @@ class MapTRPerceptionTransformer(BaseModule):
                 **kwargs)
         else:
             bev_embed = self.lss_bev_encode(
-                mlvl_feats,
+                mlvl_feats[0],
                 prev_bev=prev_bev,
                 **kwargs)
         if lidar_feat is not None:
@@ -272,10 +269,10 @@ class MapTRPerceptionTransformer(BaseModule):
                 mlvl_feats,
                 lidar_feat,
                 bev_queries,
-                target,
-                query_embeds,
-                reference_points,
-                # object_query_embed,
+                # target,
+                # query_embeds,
+                # reference_points,
+                object_query_embed,
                 bev_h,
                 bev_w,
                 grid_length=[0.512, 0.512],
@@ -341,43 +338,43 @@ class MapTRPerceptionTransformer(BaseModule):
         # reference_points[torch.isnan(reference_points)] = 0.1
         # query_embeds[torch.isnan(query_embeds)] = 0.2
 
-        # query_pos, query = torch.split(
-        #     object_query_embed, self.embed_dims, dim=1)
-        # query_pos = query_pos.unsqueeze(0).expand(bs, -1, -1)
-        # query = query.unsqueeze(0).expand(bs, -1, -1)
-        # reference_points = self.reference_points(query_pos)
-        # reference_points = reference_points.sigmoid()
-        # init_reference_out = reference_points
-
-        # query = query.permute(1, 0, 2)
-        # query_pos = query_pos.permute(1, 0, 2)
-        # bev_embed = bev_embed.permute(1, 0, 2)
-
+        query_pos, query = torch.split(
+            object_query_embed, self.embed_dims, dim=1)
+        query_pos = query_pos.unsqueeze(0).expand(bs, -1, -1)
+        query = query.unsqueeze(0).expand(bs, -1, -1)
+        reference_points = self.reference_points(query_pos)
+        reference_points = reference_points.sigmoid()
         init_reference_out = reference_points
+
+        query = query.permute(1, 0, 2)
+        query_pos = query_pos.permute(1, 0, 2)
+        bev_embed = bev_embed.permute(1, 0, 2)
+
+        # init_reference_out = reference_points
         # breakpoint()
-        inter_states, inter_references = self.decoder(
-            query=target.permute(1, 0, 2),
-            key=None,
-            value=bev_embed.permute(1, 0, 2),
-            query_pos=query_embeds.permute(1, 0, 2),
-            reference_points=reference_points,
-            reg_branches=reg_branches,
-            cls_branches=cls_branches,
-            spatial_shapes=torch.tensor([[bev_h, bev_w]], device=target.device),
-            level_start_index=torch.tensor([0], device=target.device),
-            attn_masks=attn_masks,
-            **kwargs)
         # inter_states, inter_references = self.decoder(
-        #     query=query,
+        #     query=target.permute(1, 0, 2),
         #     key=None,
-        #     value=bev_embed,
-        #     query_pos=query_pos,
+        #     value=bev_embed.permute(1, 0, 2),
+        #     query_pos=query_embeds.permute(1, 0, 2),
         #     reference_points=reference_points,
         #     reg_branches=reg_branches,
         #     cls_branches=cls_branches,
-        #     spatial_shapes=torch.tensor([[bev_h, bev_w]], device=query.device),
-        #     level_start_index=torch.tensor([0], device=query.device),
+        #     spatial_shapes=torch.tensor([[bev_h, bev_w]], device=target.device),
+        #     level_start_index=torch.tensor([0], device=target.device),
+        #     attn_masks=attn_masks,
         #     **kwargs)
+        inter_states, inter_references = self.decoder(
+            query=query,
+            key=None,
+            value=bev_embed,
+            query_pos=query_pos,
+            reference_points=reference_points,
+            reg_branches=reg_branches,
+            cls_branches=cls_branches,
+            spatial_shapes=torch.tensor([[bev_h, bev_w]], device=query.device),
+            level_start_index=torch.tensor([0], device=query.device),
+            **kwargs)
         # import pdb; pdb.set_trace()
         inter_references_out = inter_references
 

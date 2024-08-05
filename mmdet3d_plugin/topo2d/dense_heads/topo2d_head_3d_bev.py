@@ -204,6 +204,8 @@ class Topo2DHead3DBEV(AnchorFreeHead):
         self.bev_h = bev_h
         self.bev_w = bev_w
 
+        self.bev_encoder_type = transformer.encoder.type
+
         if train_cfg:
             assert 'assigner' in train_cfg
             assigner = train_cfg['assigner']
@@ -262,7 +264,8 @@ class Topo2DHead3DBEV(AnchorFreeHead):
             self.cls_out_channels = num_classes
         else:
             self.cls_out_channels = num_classes + 1
-        self.positional_encoding = build_positional_encoding(positional_encoding)
+        if self.bev_encoder_type == 'BEVFormerEncoder':
+            self.positional_encoding = build_positional_encoding(positional_encoding)
         self.transformer = build_transformer(transformer)
         self.code_weights = nn.Parameter(torch.tensor(
             self.code_weights, requires_grad=False), requires_grad=False)
@@ -282,9 +285,12 @@ class Topo2DHead3DBEV(AnchorFreeHead):
         # self.input_proj_list = _get_clones(input_proj, self.n_level)
         # self.level_embeds = nn.Parameter(torch.Tensor(self.n_level, self.embed_dims))
 
-        self.bev_embedding = nn.Embedding(
-                    self.bev_h * self.bev_w, self.embed_dims)
-
+        if self.bev_encoder_type == 'BEVFormerEncoder':
+            self.bev_embedding = nn.Embedding(
+                self.bev_h * self.bev_w, self.embed_dims)
+        else:
+            self.bev_embedding = None
+        
         cls_branch = []
         for _ in range(self.num_reg_fcs):
             cls_branch.append(Linear(self.embed_dims, self.embed_dims))
@@ -296,99 +302,116 @@ class Topo2DHead3DBEV(AnchorFreeHead):
             cls_branch.append(Linear(self.embed_dims, self.cls_out_channels))
         fc_cls = nn.Sequential(*cls_branch)
 
-        if self.lane_query:
-            # pts query -> instance query
-            self.num_fc = 2
-            self.fc_dim = self.embed_dims # 256
-            fcs_query = []
-            for i in range(self.num_fc):
-                in_dim = self.fc_dim * self.num_pts_per_vec if i == 0 else self.fc_dim
-                fcs_query.append(Linear(in_dim, self.fc_dim))
-                fcs_query.append(nn.ReLU(inplace=True))
-            self.fcs_query = nn.Sequential(*fcs_query)
-            fcs_pos = []
-            for i in range(self.num_fc):
-                in_dim = self.fc_dim * self.num_pts_per_vec if i == 0 else self.fc_dim
-                fcs_pos.append(Linear(in_dim, self.fc_dim))
-                fcs_pos.append(nn.ReLU(inplace=True))
-            self.fcs_pos = nn.Sequential(*fcs_pos)
-
-            # self.reference_points = nn.Sequential(
-            #     nn.Linear(self.embed_dims, self.embed_dims),
-            #     nn.ReLU(True),
-            #     nn.Linear(self.embed_dims, self.embed_dims),
-            #     nn.ReLU(True),
-            #     nn.Linear(self.embed_dims, 3)
-            # )
-            # self.query_embedding_lane = nn.Sequential(
-            #     nn.Linear(self.embed_dims * 3 // 2, self.embed_dims),
-            #     nn.ReLU(),
-            #     nn.Linear(self.embed_dims, self.embed_dims),
-            # )
-
-            reg_branch = []
-            for _ in range(self.num_reg_fcs):
-                reg_branch.append(Linear(self.embed_dims, self.embed_dims))
-                reg_branch.append(nn.ReLU())
-            reg_branch.append(Linear(self.embed_dims, self.n_control * self.code_size)) # 12
-            reg_branch = nn.Sequential(*reg_branch)
-        else:
-            # vis_branch = []
-            # for _ in range(self.num_reg_fcs):
-            #     vis_branch.append(Linear(self.embed_dims, self.embed_dims))
-            #     vis_branch.append(nn.LayerNorm(self.embed_dims))
-            #     vis_branch.append(nn.ReLU(inplace=True))
-            # if self.normedlinear:
-            #     vis_branch.append(NormedLinear(self.embed_dims, 1))
-            # else:
-            #     vis_branch.append(Linear(self.embed_dims, 1))
-            # fc_vis = nn.Sequential(*vis_branch)
-
-            reg_x_branch = []
-            for _ in range(self.num_reg_fcs):
-                reg_x_branch.append(Linear(self.embed_dims, self.embed_dims))
-                reg_x_branch.append(nn.ReLU())
-            reg_x_branch.append(Linear(self.embed_dims, 1))
-            reg_x_branch = nn.Sequential(*reg_x_branch)
-
-            reg_y_branch = []
-            for _ in range(self.num_reg_fcs):
-                reg_y_branch.append(Linear(self.embed_dims, self.embed_dims))
-                reg_y_branch.append(nn.ReLU())
-            reg_y_branch.append(Linear(self.embed_dims, 1))
-            reg_y_branch = nn.Sequential(*reg_y_branch)
-
-            reg_z_branch = []
-            for _ in range(self.num_reg_fcs):
-                reg_z_branch.append(Linear(self.embed_dims, self.embed_dims))
-                reg_z_branch.append(nn.ReLU())
-            reg_z_branch.append(Linear(self.embed_dims, 1))
-            reg_z_branch = nn.Sequential(*reg_z_branch)
+        reg_branch = []
+        for _ in range(self.num_reg_fcs):
+            reg_branch.append(Linear(self.embed_dims, self.embed_dims))
+            reg_branch.append(nn.ReLU())
+        reg_branch.append(Linear(self.embed_dims, self.code_size))
+        reg_branch = nn.Sequential(*reg_branch)
 
         if self.shared_head_params:
             self.cls_branches = nn.ModuleList(
-                [fc_cls for _ in range(self.num_pred)])
-            if self.lane_query:
-                self.reg_branches = nn.ModuleList(
-                    [reg_branch for _ in range(self.num_pred)])
-            else:
-                # self.vis_branches = nn.ModuleList(
-                #     [fc_vis for _ in range(self.num_pred)])
-                self.reg_x_branches = nn.ModuleList(
-                    [reg_x_branch for _ in range(self.num_pred)])
-                self.reg_y_branches = nn.ModuleList(
-                    [reg_y_branch for _ in range(self.num_pred)])
-                self.reg_z_branches = nn.ModuleList(
-                    [reg_z_branch for _ in range(self.num_pred)])
+                    [fc_cls for _ in range(self.num_pred)])
+            self.reg_branches = nn.ModuleList(
+                [reg_branch for _ in range(self.num_pred)])
         else:
             self.cls_branches = _get_clones(fc_cls, self.num_pred)
-            if self.lane_query:
-                self.reg_branches = _get_clones(reg_branch, self.num_pred)
-            else:
-                # self.vis_branches = _get_clones(fc_vis, self.num_pred)
-                self.reg_x_branches = _get_clones(reg_x_branch, self.num_pred)
-                self.reg_y_branches = _get_clones(reg_y_branch, self.num_pred)
-                self.reg_z_branches = _get_clones(reg_z_branch, self.num_pred)
+            self.reg_branches = _get_clones(reg_branch, self.num_pred)
+
+
+        # if self.lane_query:
+        #     # pts query -> instance query
+        #     self.num_fc = 2
+        #     self.fc_dim = self.embed_dims # 256
+        #     fcs_query = []
+        #     for i in range(self.num_fc):
+        #         in_dim = self.fc_dim * self.num_pts_per_vec if i == 0 else self.fc_dim
+        #         fcs_query.append(Linear(in_dim, self.fc_dim))
+        #         fcs_query.append(nn.ReLU(inplace=True))
+        #     self.fcs_query = nn.Sequential(*fcs_query)
+        #     fcs_pos = []
+        #     for i in range(self.num_fc):
+        #         in_dim = self.fc_dim * self.num_pts_per_vec if i == 0 else self.fc_dim
+        #         fcs_pos.append(Linear(in_dim, self.fc_dim))
+        #         fcs_pos.append(nn.ReLU(inplace=True))
+        #     self.fcs_pos = nn.Sequential(*fcs_pos)
+
+        #     # self.reference_points = nn.Sequential(
+        #     #     nn.Linear(self.embed_dims, self.embed_dims),
+        #     #     nn.ReLU(True),
+        #     #     nn.Linear(self.embed_dims, self.embed_dims),
+        #     #     nn.ReLU(True),
+        #     #     nn.Linear(self.embed_dims, 3)
+        #     # )
+        #     # self.query_embedding_lane = nn.Sequential(
+        #     #     nn.Linear(self.embed_dims * 3 // 2, self.embed_dims),
+        #     #     nn.ReLU(),
+        #     #     nn.Linear(self.embed_dims, self.embed_dims),
+        #     # )
+
+        #     reg_branch = []
+        #     for _ in range(self.num_reg_fcs):
+        #         reg_branch.append(Linear(self.embed_dims, self.embed_dims))
+        #         reg_branch.append(nn.ReLU())
+        #     reg_branch.append(Linear(self.embed_dims, self.n_control * self.code_size)) # 12
+        #     reg_branch = nn.Sequential(*reg_branch)
+        # else:
+        #     # vis_branch = []
+        #     # for _ in range(self.num_reg_fcs):
+        #     #     vis_branch.append(Linear(self.embed_dims, self.embed_dims))
+        #     #     vis_branch.append(nn.LayerNorm(self.embed_dims))
+        #     #     vis_branch.append(nn.ReLU(inplace=True))
+        #     # if self.normedlinear:
+        #     #     vis_branch.append(NormedLinear(self.embed_dims, 1))
+        #     # else:
+        #     #     vis_branch.append(Linear(self.embed_dims, 1))
+        #     # fc_vis = nn.Sequential(*vis_branch)
+
+        #     reg_x_branch = []
+        #     for _ in range(self.num_reg_fcs):
+        #         reg_x_branch.append(Linear(self.embed_dims, self.embed_dims))
+        #         reg_x_branch.append(nn.ReLU())
+        #     reg_x_branch.append(Linear(self.embed_dims, 1))
+        #     reg_x_branch = nn.Sequential(*reg_x_branch)
+
+        #     reg_y_branch = []
+        #     for _ in range(self.num_reg_fcs):
+        #         reg_y_branch.append(Linear(self.embed_dims, self.embed_dims))
+        #         reg_y_branch.append(nn.ReLU())
+        #     reg_y_branch.append(Linear(self.embed_dims, 1))
+        #     reg_y_branch = nn.Sequential(*reg_y_branch)
+
+        #     reg_z_branch = []
+        #     for _ in range(self.num_reg_fcs):
+        #         reg_z_branch.append(Linear(self.embed_dims, self.embed_dims))
+        #         reg_z_branch.append(nn.ReLU())
+        #     reg_z_branch.append(Linear(self.embed_dims, 1))
+        #     reg_z_branch = nn.Sequential(*reg_z_branch)
+
+        # if self.shared_head_params:
+        #     self.cls_branches = nn.ModuleList(
+        #         [fc_cls for _ in range(self.num_pred)])
+        #     if self.lane_query:
+        #         self.reg_branches = nn.ModuleList(
+        #             [reg_branch for _ in range(self.num_pred)])
+        #     else:
+        #         # self.vis_branches = nn.ModuleList(
+        #         #     [fc_vis for _ in range(self.num_pred)])
+        #         self.reg_x_branches = nn.ModuleList(
+        #             [reg_x_branch for _ in range(self.num_pred)])
+        #         self.reg_y_branches = nn.ModuleList(
+        #             [reg_y_branch for _ in range(self.num_pred)])
+        #         self.reg_z_branches = nn.ModuleList(
+        #             [reg_z_branch for _ in range(self.num_pred)])
+        # else:
+        #     self.cls_branches = _get_clones(fc_cls, self.num_pred)
+        #     if self.lane_query:
+        #         self.reg_branches = _get_clones(reg_branch, self.num_pred)
+        #     else:
+        #         # self.vis_branches = _get_clones(fc_vis, self.num_pred)
+        #         self.reg_x_branches = _get_clones(reg_x_branch, self.num_pred)
+        #         self.reg_y_branches = _get_clones(reg_y_branch, self.num_pred)
+        #         self.reg_z_branches = _get_clones(reg_z_branch, self.num_pred)
 
         if self.with_multiview:
             self.adapt_pos3d = nn.Sequential(
@@ -718,31 +741,31 @@ class Topo2DHead3DBEV(AnchorFreeHead):
             bev_queries = None
             bev_mask = None
             bev_pos = None
-        batch_size = 1
-        num_cams = 7
-        # self_attn_mask = torch.zeros(
-        #     [self.num_query * self.num_pts_per_vec, self.num_query * self.num_pts_per_vec]
-        # ).bool().to(mlvl_feats[0].device)
-        # self_attn_mask[self.num_lanes_one2one * self.num_pts_per_vec:, 
-        #     : self.num_lanes_one2one * self.num_pts_per_vec] = True
-        # self_attn_mask[: self.num_lanes_one2one * self.num_pts_per_vec, 
-        #     self.num_lanes_one2one * self.num_pts_per_vec:] = True
-        # # import pdb; pdb.set_trace()
-        # target = target.reshape(batch_size, num_cams, self.num_query // num_cams, self.num_pts_per_vec, self.embed_dims)
-        # query_embeds = query_embeds.reshape(batch_size, num_cams, self.num_query // num_cams, self.num_pts_per_vec, self.embed_dims)
-        # reference_points = reference_points.reshape(batch_size, num_cams, self.num_query // num_cams, self.num_pts_per_vec, 3)
-        # target_one2many = torch.cat(
-        #     [target[:, :, :self.num_lanes_one2one // num_cams].flatten(1, 2),
-        #     target[:, :, self.num_lanes_one2one // num_cams:].flatten(1, 2)], dim=1
-        # ).flatten(1, 2)
-        # query_embeds_one2many = torch.cat(
-        #     [query_embeds[:, :, :self.num_lanes_one2one // num_cams].flatten(1, 2),
-        #     query_embeds[:, :, self.num_lanes_one2one // num_cams:].flatten(1, 2)], dim=1
-        # ).flatten(1, 2)
-        # reference_points_one2many = torch.cat(
-        #     [reference_points[:, :, :self.num_lanes_one2one // num_cams].flatten(1, 2),
-        #     reference_points[:, :, self.num_lanes_one2one // num_cams:].flatten(1, 2)], dim=1
-        # ).flatten(1, 2)
+        batch_size = bs
+        num_cams = num_cam
+        self_attn_mask = torch.zeros(
+            [self.num_query * self.num_pts_per_vec, self.num_query * self.num_pts_per_vec]
+        ).bool().to(mlvl_feats[0].device)
+        self_attn_mask[self.num_lanes_one2one * self.num_pts_per_vec:, 
+            : self.num_lanes_one2one * self.num_pts_per_vec] = True
+        self_attn_mask[: self.num_lanes_one2one * self.num_pts_per_vec, 
+            self.num_lanes_one2one * self.num_pts_per_vec:] = True
+        # import pdb; pdb.set_trace()
+        target = target.reshape(batch_size, num_cams, self.num_query // num_cams, self.num_pts_per_vec, self.embed_dims)
+        query_embeds = query_embeds.reshape(batch_size, num_cams, self.num_query // num_cams, self.num_pts_per_vec, self.embed_dims)
+        reference_points = reference_points.reshape(batch_size, num_cams, self.num_query // num_cams, self.num_pts_per_vec, 3)
+        target_one2many = torch.cat(
+            [target[:, :, :self.num_lanes_one2one // num_cams].flatten(1, 2),
+            target[:, :, self.num_lanes_one2one // num_cams:].flatten(1, 2)], dim=1
+        ).flatten(1, 2)
+        query_embeds_one2many = torch.cat(
+            [query_embeds[:, :, :self.num_lanes_one2one // num_cams].flatten(1, 2),
+            query_embeds[:, :, self.num_lanes_one2one // num_cams:].flatten(1, 2)], dim=1
+        ).flatten(1, 2)
+        reference_points_one2many = torch.cat(
+            [reference_points[:, :, :self.num_lanes_one2one // num_cams].flatten(1, 2),
+            reference_points[:, :, self.num_lanes_one2one // num_cams:].flatten(1, 2)], dim=1
+        ).flatten(1, 2)
 
         # import pdb; pdb.set_trace()
 
@@ -751,15 +774,16 @@ class Topo2DHead3DBEV(AnchorFreeHead):
             mlvl_feats,
             lidar_feat,
             bev_queries,
-            target,
-            query_embeds,
-            reference_points[:,:,:2],
+            target_one2many,
+            query_embeds_one2many,
+            reference_points_one2many,
             self.bev_h,
             self.bev_w,
             grid_length=(self.real_h / self.bev_h,
                             self.real_w / self.bev_w),
             bev_pos=bev_pos,
-            reg_branches=None,  # noqa:E501
+            # reg_branches=None,  # noqa:E501
+            reg_branches=self.reg_branches,
             cls_branches=None,
             img_metas=img_metas,
             prev_bev=None,
@@ -768,32 +792,68 @@ class Topo2DHead3DBEV(AnchorFreeHead):
 
         bev_embed, hs, init_reference, inter_references = outputs
         # hs = target.permute(1, 0, 2).contiguous()[None].repeat(6,1,111)
-        outs_dec = torch.nan_to_num(hs.permute(0, 2, 1, 3)) # (layer, B, Q, C)
+        hs = hs.permute(0, 2, 1, 3)
+        outs_dec = torch.nan_to_num(hs) # (layer, B, Q, C)
         outputs_classes = []
         outputs_coords = []
         outputs_vis = []
         outputs_pts_coords = []
-        batch_size = 1
-        for lvl in range(outs_dec.shape[0]):
-            outputs_class = self.cls_branches[lvl](outs_dec[lvl]
-                                            .view(batch_size, self.num_query, self.num_pts_per_vec, -1)
-                                            .mean(2)) # B, Q, class
+
+        for lvl in range(hs.shape[0]):
+            if lvl == 0:
+                # import pdb;pdb.set_trace()
+                reference = init_reference[...,0:3]
+            else:
+                reference = inter_references[lvl - 1][...,0:3]
+            reference = inverse_sigmoid(reference)
+            # import pdb;pdb.set_trace()
+            # vec_embedding = hs[lvl].reshape(bs, self.num_vec, -1)
+            outputs_class = self.cls_branches[lvl](hs[lvl]
+                                            .view(bs, self.num_query, self.num_pts_per_vec,-1)
+                                            .mean(2))
             vis = outputs_class.new_ones(batch_size, self.num_query, self.num_pts_per_vec) # all vis
             outputs_coord = outputs_class.new_zeros(batch_size, self.num_query, 4) # all zeros, dummy bbox
 
-            outputs_pts_x = self.reg_x_branches[lvl](outs_dec[lvl]) # B, Q, 20
-            outputs_pts_y = self.reg_y_branches[lvl](outs_dec[lvl]) # B, Q, 20
-            outputs_pts_z = self.reg_z_branches[lvl](outs_dec[lvl]) # B, Q, 20
-            outputs_pts_x = outputs_pts_x.view(batch_size, self.num_query, self.num_pts_per_vec)
-            outputs_pts_y = outputs_pts_y.view(batch_size, self.num_query, self.num_pts_per_vec)
-            outputs_pts_z = outputs_pts_z.view(batch_size, self.num_query, self.num_pts_per_vec)
-            outputs_pts_coord = torch.stack((outputs_pts_x, outputs_pts_y, outputs_pts_z), dim=3) # B, Q, 20, 3
-            outputs_pts_coord = outputs_pts_coord.sigmoid() # NOTE: sigmoid here
+            tmp = self.reg_branches[lvl](hs[lvl])
+            tmp = tmp[..., 0:3]
+            # TODO: check the shape of reference
+            # assert reference.shape[-1] == 2
+            # tmp[..., 0:2] += reference[..., 0:2]
+            # assert reference.shape[-1] == 2
+            tmp += reference
+
+            tmp = tmp.sigmoid() # cx,cy,w,h
+            # breakpoint()
+            # if not self.z_cfg['gt_z_flag']:
+            # tmp = tmp[..., 0:2] if not self.z_cfg['gt_z_flag'] else tmp[..., 0:3]
+            # TODO: check if using sigmoid
+            _, outputs_pts_coord = self.transform_box(tmp,num_vec=self.num_query)
 
             outputs_classes.append(outputs_class)
             outputs_vis.append(vis)
             outputs_coords.append(outputs_coord)
             outputs_pts_coords.append(outputs_pts_coord)
+
+        # for lvl in range(outs_dec.shape[0]):
+        #     outputs_class = self.cls_branches[lvl](outs_dec[lvl]
+        #                                     .view(batch_size, self.num_query, self.num_pts_per_vec, -1)
+        #                                     .mean(2)) # B, Q, class
+        #     vis = outputs_class.new_ones(batch_size, self.num_query, self.num_pts_per_vec) # all vis
+        #     outputs_coord = outputs_class.new_zeros(batch_size, self.num_query, 4) # all zeros, dummy bbox
+
+        #     outputs_pts_x = self.reg_x_branches[lvl](outs_dec[lvl]) # B, Q, 20
+        #     outputs_pts_y = self.reg_y_branches[lvl](outs_dec[lvl]) # B, Q, 20
+        #     outputs_pts_z = self.reg_z_branches[lvl](outs_dec[lvl]) # B, Q, 20
+        #     outputs_pts_x = outputs_pts_x.view(batch_size, self.num_query, self.num_pts_per_vec)
+        #     outputs_pts_y = outputs_pts_y.view(batch_size, self.num_query, self.num_pts_per_vec)
+        #     outputs_pts_z = outputs_pts_z.view(batch_size, self.num_query, self.num_pts_per_vec)
+        #     outputs_pts_coord = torch.stack((outputs_pts_x, outputs_pts_y, outputs_pts_z), dim=3) # B, Q, 20, 3
+        #     outputs_pts_coord = outputs_pts_coord.sigmoid() # NOTE: sigmoid here
+
+        #     outputs_classes.append(outputs_class)
+        #     outputs_vis.append(vis)
+        #     outputs_coords.append(outputs_coord)
+        #     outputs_pts_coords.append(outputs_pts_coord)
     
         outputs_classes = torch.stack(outputs_classes)
         outputs_coords = torch.stack(outputs_coords)
@@ -805,10 +865,42 @@ class Topo2DHead3DBEV(AnchorFreeHead):
             'all_vis_scores': outputs_vis, # [24, 50, 20] * 6
             'all_bbox_preds': outputs_coords, # [24, 50, 4] * 6
             'all_pts_preds': outputs_pts_coords, # [24, 50, 20, 2] * 6
+            'all_ref_pts': inter_references,
         }
         # import pdb; pdb.set_trace()
         return outs
     
+    def transform_box(self, pts, num_vec=50, y_first=False):
+        """
+        Converting the points set into bounding box.
+
+        Args:
+            pts: the input points sets (fields), each points
+                set (fields) is represented as 2n scalar.
+            y_first: if y_fisrt=True, the point set is represented as
+                [y1, x1, y2, x2 ... yn, xn], otherwise the point set is
+                represented as [x1, y1, x2, y2 ... xn, yn].
+        Returns:
+            The bbox [cx, cy, w, h] transformed from points.
+        """
+        
+        pts_reshape = pts.view(pts.shape[0], num_vec,
+                                self.num_pts_per_vec,3)
+       
+        pts_y = pts_reshape[:, :, :, 0] if y_first else pts_reshape[:, :, :, 1]
+        pts_x = pts_reshape[:, :, :, 1] if y_first else pts_reshape[:, :, :, 0]
+       
+        # import pdb;pdb.set_trace()
+
+        xmin = pts_x.min(dim=2, keepdim=True)[0]
+        xmax = pts_x.max(dim=2, keepdim=True)[0]
+        ymin = pts_y.min(dim=2, keepdim=True)[0]
+        ymax = pts_y.max(dim=2, keepdim=True)[0]
+        bbox = torch.cat([xmin, ymin, xmax, ymax], dim=2)
+        bbox = bbox_xyxy_to_cxcywh(bbox)
+
+        return bbox, pts_reshape
+
     def control_points_to_lane_points(self, lanes):
         # input: batch_size, self.num_query, self.n_control, self.code_size
         # output: batch_size, self.num_query, self.num_pts_per_vec, self.code_size

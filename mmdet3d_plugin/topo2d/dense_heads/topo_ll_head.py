@@ -120,16 +120,18 @@ class TopoLLHead(nn.Module):
         o2_feat = o2_feats[-1].clone()
         o1_pos = o1_pos[-1].clone()
         o2_pos = o2_pos[-1].clone()
-        o1_feat_2d = o1_feats_2d[-1] # .clone()
-        o2_feat_2d = o2_feats_2d[-1] # .clone()
+        if self.add_2d_query:
+            o1_feat_2d = o1_feats_2d[-1] # .clone()
+            o2_feat_2d = o2_feats_2d[-1] # .clone()
 
         if self.is_detach:
             o1_pos = o1_pos.detach()
             o2_pos = o2_pos.detach()
             o1_feat = o1_feat.detach()
             o2_feat = o2_feat.detach()
-            o1_feat_2d = o1_feat_2d.detach()
-            o2_feat_2d = o2_feat_2d.detach()
+            if self.add_2d_query:
+                o1_feat_2d = o1_feat_2d.detach()
+                o2_feat_2d = o2_feat_2d.detach()
 
         B, vec, pts, _ = o1_pos.shape
         o1_feat = o1_feat.view(B, vec, pts, -1).mean(2) # B, vec, embed

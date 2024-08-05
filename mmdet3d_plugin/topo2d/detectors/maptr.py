@@ -28,10 +28,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pickle as pkl
-from mmdet.models.utils.transformer import inverse_sigmoid
 
 @DETECTORS.register_module()
-class Topo2D(MVXTwoStageDetector):
+class MapTR(MVXTwoStageDetector):
     """MapTR.
     Args:
         video_test_mode (bool): Decide whether to use temporal information during inference.
@@ -88,12 +87,12 @@ class Topo2D(MVXTwoStageDetector):
                  traffic=True,
                  ):
         # import pdb; pdb.set_trace()
-        super(Topo2D,
+        super(MapTR,
               self).__init__(pts_voxel_layer, pts_voxel_encoder,
                              pts_middle_encoder, pts_fusion_layer,
                              img_backbone, pts_backbone, img_neck, pts_neck,
-                             pts_bbox_head, img_roi_head, img_rpn_head,
-                             train_cfg, test_cfg, pretrained)
+                             None, img_roi_head, img_rpn_head,
+                             None, test_cfg, pretrained)
         self.grid_mask = GridMask(
             True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
         self.use_grid_mask = use_grid_mask
@@ -146,13 +145,14 @@ class Topo2D(MVXTwoStageDetector):
             self.topo_lt_head = builder.build_head(lcte_head)
             self.te_head = builder.build_head(te_head)
         self.multiScale = False
+        self.pts_bbox_head_3d = builder.build_head(pts_bbox_head_3d)
         if ms2one is not None:
             self.multiScale = True
             self.ms2one = build_ms2one(ms2one)
         if not self.only_2d:
             # self.out_fov_reference_points = nn.Embedding(self.num_vec * self.num_pts_per_vec, 3)
             # nn.init.uniform_(self.out_fov_reference_points.weight.data, 0, 1)
-            self.query_generator = QueryGenerator(**query_generator)
+            self.query_generator = None
             self.embed_dims = 256
             self.learn_3d_query = learn_3d_query
             if self.learn_3d_query:
@@ -189,7 +189,6 @@ class Topo2D(MVXTwoStageDetector):
             #     fcs_pos.append(Linear(in_dim, self.fc_dim))
             #     fcs_pos.append(nn.ReLU(inplace=True))
             # self.fcs_pos = nn.Sequential(*fcs_pos)
-            self.pts_bbox_head_3d = builder.build_head(pts_bbox_head_3d)
             self.mask_head = mask_head
             if self.mask_head:
                 self.sparse_int = SparseInsDecoderMask(cfg=sparse_ins_decoder)
@@ -454,226 +453,6 @@ class Topo2D(MVXTwoStageDetector):
             indexs_batched.append(indexs)
         return indexs_batched
 
-    def forward_pts_train_3d(self, outs, pts_feats, gt_camera_extrinsic,
-                            gt_camera_intrinsic, gt_homography_matrix,
-                            gt_project_matrix, img_metas):
-        # NOTE: deform detr encoder
-        pts_feats = outs['mlvl_feats_encoder']
-        
-        B, N, C, H, W = pts_feats[0].shape
-        proposal_list = outs['all_pts_preds'][-1] # [12, 50, 20, 2]
-        # breakpoint()
-        if self.ref_pts_detach:
-            proposal_list = proposal_list.clone().detach()
-        query_embeds = outs['query'][-1] # [12, 1000, 256]
-        query_embeds = query_embeds.view(*proposal_list.shape[:3], -1) # [12, 50, 20, 256]
-        if N > 1: # multi view feat
-            # [12, topk, 20, 2] and [12, topk, 20, 256]
-            # proposal_list, query_embeds = self.get_proposal(outs, topk=10)
-            pts_feats[0] = pts_feats[0].view(B * N, 1, C, H, W)
-            gt_camera_extrinsic = gt_camera_extrinsic.view(B * N, 1, 
-                                        *gt_camera_extrinsic.shape[-2:]) # 4, 4
-            gt_camera_intrinsic = gt_camera_intrinsic.view(B * N, 1, 
-                                        *gt_camera_intrinsic.shape[-2:])[:, :, :3, :3] # 3, 3
-            gt_homography_matrix = gt_homography_matrix.view(B * N, 1, 
-                                        *gt_homography_matrix.shape[-2:])[:, :, :3, :3] # 3, 3
-            gt_project_matrix = gt_project_matrix.view(B * N, 1, 
-                                        *gt_project_matrix.shape[-2:])[:, :, :3, :] # 3, 4
-        # else:
-        #     proposal_list = outs['all_pts_preds'][-1] # [12, 50, 20, 2]
-        #     query_embeds = outs['query'][-1] # [12, 1000, 256]
-        #     query_embeds = query_embeds.view(*proposal_list.shape[:3], -1) # [12, 50, 20, 256]
-        # backbone feature [16, 50, 20, 256]
-        bbox_feats = self.roi_feature(pts_feats, proposal_list)
-
-        # extra_feats: gt_camera_intrinsic
-        viewpad = torch.zeros_like(gt_camera_extrinsic) # 16, 1, 4, 4
-        viewpad[:, :, :3, :3] = gt_camera_intrinsic
-        viewpad[:, :, 3, 3] = 1. # eye matric
-        extra_feats = viewpad.reshape(-1, 1, 1, 16) # 16, 1, 1, 16
-        extra_feats = extra_feats.repeat(1, bbox_feats.shape[1], bbox_feats.shape[2], 1) # 16, 50, 20, 16
-        extra_feats = extra_feats * self.intrins_feat_scale # scale 0.1
-
-        # reference_points: 16, 50, 20, 3
-        # pos_embeds: 16, 50, 256
-        reference_points, pos_embeds = None, None
-        if self.pos_embed_method == 'uniform':
-            pos_embeds = self.pos2posemb2d(proposal_list, num_pos_feats=self.embed_dims//2)
-            pos_embeds = self.query_embedding_2d(pos_embeds)
-            pos_embeds = pos_embeds.flatten(2)  # bs, num_vec, num_pts * c
-            pos_embeds = self.fcs_pos(pos_embeds) # B, Q, C
-            pass
-        elif self.pos_embed_method == 'ipm' or self.pos_embed_method == 'pred':
-            # import pdb; pdb.set_trace()
-            reference_points, _ = self.query_generator(bbox_feats, extra_feats, 
-                                    img_metas, proposal_list, self.pos_embed_method,
-                                    gt_homography_matrix, gt_project_matrix)
-            # NOTE: use query_embeds or bbox_feats
-            # reference_points, _ = self.query_generator(query_embeds, extra_feats, 
-            #                         img_metas, proposal_list, self.pos_embed_method,
-            #                         gt_homography_matrix, gt_project_matrix)
-            reference_points = self.normalize_ref_pts(reference_points, self.position_range)
-            pos_embeds = self.pos2posemb3d(reference_points, num_pos_feats=self.embed_dims//2)
-            pos_embeds = self.query_embedding(pos_embeds)
-            # pos_embeds = pos_embeds.flatten(2)  # bs, num_vec, num_pts * c
-            # pos_embeds = self.fcs_pos(pos_embeds) # B, Q, C
-            pass
-        elif self.pos_embed_method == 'anchor':
-            # [NOTE] to be consistent with petr, position_range is used to normalize ref pts,
-            # also, inverse_sigmoid is used to transformer coordinate to logit
-            # import pdb; pdb.set_trace()
-            reference_points, _ = self.query_generator(bbox_feats, extra_feats, 
-                                    img_metas, proposal_list, self.pos_embed_method,
-                                    gt_homography_matrix, gt_project_matrix,
-                                    self.pts_bbox_head_3d.position_range)
-            reference_points = reference_points.flatten(3) # 16, 50, 20, 64 * 3
-            # import pdb; pdb.set_trace()
-            if self.pe_sample:
-                reference_points = reference_points.permute(0, 3, 1, 2).contiguous() # B, C, H, W
-                pos_embeds = self.pts_bbox_head_3d.position_encoder(reference_points)
-                reference_points = reference_points.permute(0, 2, 3, 1).contiguous() # B, vec, pts, C
-                pos_embeds = pos_embeds.permute(0, 2, 3, 1).contiguous() # B, vec, pts, C
-            else:
-                pos_embeds = self.query_embedding_petr(reference_points)
-            # pos_embeds = pos_embeds.flatten(2)  # bs, num_vec, num_pts * c
-            # pos_embeds = self.fcs_pos(pos_embeds) # B, Q, C
-            pass
-
-        # if self.learn_3d_pe:
-        #     out_fov_query_embeds = self.learn_pe_embed.weight.to(pos_embeds.dtype)
-        # else:
-        #     out_fov_reference_points = self.out_fov_reference_points.weight
-        #     out_fov_query_embeds = self.pos2posemb3d(out_fov_reference_points)
-        #     out_fov_query_embeds = self.query_embedding(out_fov_query_embeds)
-        # out_fov_query_embeds = out_fov_query_embeds.view(1, *pos_embeds.shape[1:])
-        # out_fov_query_embeds = out_fov_query_embeds.repeat(B * N, 1, 1, 1)
-        vis_scores = outs['all_vis_scores'][-1].sigmoid() # bs, num_vec * num_pts, 1
-        vis_scores = vis_scores.view(*pos_embeds.shape[:3], 1)
-        # pos_embeds = torch.where(
-        #     vis_scores > 0.5,
-        #     pos_embeds,
-        #     out_fov_query_embeds,
-        # ) # bs, num_vec, num_pts, c
-
-        # bbox_feats = bbox_feats.flatten(2)  # bs, num_vec, num_pts * c
-        # bbox_feats = self.fcs_pos(bbox_feats) # B, Q, C
-        # roi_feat = roi_feat.flatten(2)  # bs, num_vec, num_pts * c
-        # roi_feat = self.fcs_pos(roi_feat) # B, Q, C
-
-        # query_embeds = outs['query'][-1].view(bbox_feats.shape)
-        # query_embeds = query_embeds.flatten(2)  # bs, num_vec, num_pts * c
-        # query_embeds = self.fcs_query(query_embeds) # B, Q, C
-        query_embeds_seg = query_embeds.mean(2) # # bs, num_vec, c
-
-        # if self.learn_3d_query:
-        #     out_fov_3d_query = self.learn_query_embed.weight.to(query_embeds.dtype)
-        #     out_fov_3d_query = out_fov_3d_query.view(1, *query_embeds.shape[1:])
-        #     out_fov_3d_query = out_fov_3d_query.repeat(B * N, 1, 1, 1)
-        #     query_embeds = torch.where(
-        #         vis_scores > 0.5,
-        #         query_embeds,
-        #         out_fov_3d_query,
-        #     ) # bs, num_vec, num_pts, c
-
-        if self.fusion_method == 'query':
-            pass
-        # elif self.fusion_method == 'roi':
-        #     query_embeds = query_embeds + bbox_feats
-        # elif self.fusion_method == 'extra':
-        #     query_embeds = query_embeds + roi_feat
-        else:
-            raise NotImplementedError
-
-        # import pdb; pdb.set_trace()
-        outputs = {}
-        if self.mask_head:
-            # outputs_mask, outputs_scores = self.sparse_int(pts_feats[0], query_embeds)
-            outputs_mask, outputs_scores = self.sparse_int(pts_feats[0], query_embeds_seg)
-            outputs['pred_masks'] = outputs_mask
-            outputs['pred_scores'] = outputs_scores
-        else:
-            outputs_mask = pts_feats[0].new_zeros(*proposal_list.shape[:2], H, W) # B * N, Q, H, W
-        # if N > 1:
-        #     pts_feats[0] = pts_feats[0].view(B, N, C, H, W)
-        #     gt_camera_extrinsic = gt_camera_extrinsic.view(B, N, *gt_camera_extrinsic.shape[-2:])
-        #     gt_camera_intrinsic = gt_camera_intrinsic.view(B, N, *gt_camera_intrinsic.shape[-2:])
-        #     gt_homography_matrix = gt_homography_matrix.view(B, N, *gt_homography_matrix.shape[-2:])
-        #     gt_project_matrix = gt_project_matrix.view(B, N, *gt_project_matrix.shape[-2:])
-        #     query_embeds = query_embeds.view(B, -1, query_embeds.shape[-1]) # B, N * topk, 256
-        #     pos_embeds = pos_embeds.view(B, -1, pos_embeds.shape[-1]) # B, N * topk, 256
-        
-        # B = 1, N > 1
-        pts_feats[0] = pts_feats[0].view(B, N, C, H, W)
-        gt_camera_extrinsic = gt_camera_extrinsic.view(B, N, *gt_camera_extrinsic.shape[-2:])
-        gt_camera_intrinsic = gt_camera_intrinsic.view(B, N, *gt_camera_intrinsic.shape[-2:])
-        gt_homography_matrix = gt_homography_matrix.view(B, N, *gt_homography_matrix.shape[-2:])
-        gt_project_matrix = gt_project_matrix.view(B, N, *gt_project_matrix.shape[-2:])    
-        # import pdb; pdb.set_trace()
-        if self.proposal_cfg_score_thresh > 0:
-            proposal_list = proposal_list.reshape(B, -1, *proposal_list.shape[2:])
-            query_embeds = query_embeds.reshape(B, -1, *query_embeds.shape[2:])
-            reference_points = reference_points.reshape(B, -1, *reference_points.shape[2:])
-            pos_embeds = pos_embeds.reshape(B, -1, *pos_embeds.shape[2:])
-            vis_scores = vis_scores.reshape(B, -1, *vis_scores.shape[2:])
-            outputs_mask = outputs_mask.reshape(B, -1, *outputs_mask.shape[2:])
-
-            cls_scores = outs['all_cls_scores'][-1] # B * N, vec, 1
-            cls_scores = cls_scores.view(B, N * self.num_vec, -1)
-            cls_scores = cls_scores.sigmoid()
-            num_classes = cls_scores.shape[-1]
-            cls_scores = cls_scores.flatten(1) # B, N * self.num_vec * cls
-
-            indexes_batched = []
-            for i in range(len(cls_scores)):
-                scores = cls_scores[i]
-                order = scores.argsort(descending=True)
-                keep = []
-                for o in order:
-                    if scores[o] < self.proposal_cfg_score_thresh:
-                        break
-                    else:
-                        keep.append(o)
-                if len(keep):
-                    indexs = torch.tensor(keep)[:self.topk_2d_proposal]
-                else:
-                    indexs = torch.tensor(order)[:self.topk_2d_proposal]
-                indexs = indexs // num_classes
-                indexes_batched.append(indexs)
-
-            def pad_tensor(t, N):
-                # B, N, ...
-                if t.shape[1] < N:
-                    padding = t.new_zeros([t.shape[0], N - t.shape[1], *t.shape[2:]])
-                    t = torch.cat((t, padding), dim=1)
-                return t
-
-            proposal_list = pad_tensor(proposal_list[:, indexs], self.topk_2d_proposal)
-            query_embeds = pad_tensor(query_embeds[:, indexs], self.topk_2d_proposal)
-            reference_points = pad_tensor(reference_points[:, indexs], self.topk_2d_proposal)
-            pos_embeds = pad_tensor(pos_embeds[:, indexs], self.topk_2d_proposal)
-            vis_scores = pad_tensor(vis_scores[:, indexs], self.topk_2d_proposal)
-            outputs_mask = pad_tensor(outputs_mask[:, indexs], self.topk_2d_proposal)
-        else:
-            query_embeds = query_embeds.reshape(B, N * self.topk_2d_proposal, *query_embeds.shape[2:]) # B, N * topk, pts, 256
-            reference_points = reference_points.reshape(B, N * self.topk_2d_proposal, *reference_points.shape[2:]) # B, N * topk, pts, 64*3
-            pos_embeds = pos_embeds.reshape(B, N * self.topk_2d_proposal, *pos_embeds.shape[2:]) # B, N * topk, pts, 256
-            vis_scores = vis_scores.reshape(B, N * self.topk_2d_proposal, *vis_scores.shape[2:]) # B, N * topk, pts, 1
-        # import pdb; pdb.set_trace()
-        outputs_3d = self.pts_bbox_head_3d(pts_feats, # img feat
-                                    proposal_list, # 2d lane pts
-                                    query_embeds.flatten(1, 2), # 2d decoder query
-                                    reference_points.flatten(1, 2), # pred ref pts
-                                    pos_embeds.flatten(1, 2), # ref pts pos embed
-                                    vis_scores.flatten(1, 2), # ref pts vis score
-                                    gt_homography_matrix,
-                                    gt_project_matrix,
-                                    img_metas, 
-                                    # outputs['pred_masks'],
-                                    outputs_mask,
-                                    )
-        outputs.update(outputs_3d)
-        return outputs
-
     def forward_pts_train(self,
                           pts_feats,
                           img_metas=None,
@@ -711,19 +490,17 @@ class Topo2D(MVXTwoStageDetector):
             dict: Losses of each branch.
         """
         # import pdb; pdb.set_trace()
-        outs = self.pts_bbox_head(pts_feats, lidar_feat, img_metas, prev_bev)
-        # breakpoint()
-        outs_dec_2d = outs['query'].clone()
-        outs_dec_2d = outs_dec_2d[:, :, :self.num_vec // 4 * self.num_pts_per_vec]
-        loss_inputs = [gt_3dlanes, gt_2dlanes, gt_2dboxes, gt_labels, outs]        
-        losses, _, _, _ = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
+        # outs = self.pts_bbox_head(pts_feats, lidar_feat, img_metas, prev_bev)
+        # outs_dec_2d = outs['query'].clone()
+        # loss_inputs = [gt_3dlanes, gt_2dlanes, gt_2dboxes, gt_labels, outs]        
+        # losses, _, _, _ = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
         
-        outs_3d = self.forward_pts_train_3d(outs, pts_feats, gt_camera_extrinsic,
-                        gt_camera_intrinsic, gt_homography_matrix,
-                        gt_project_matrix, img_metas)
-        loss, pos_inds_list, pos_assigned_gt_inds, num_total_pos = self.pts_bbox_head_3d.loss(
+        # outs_3d = self.forward_pts_train_3d(outs, pts_feats, gt_camera_extrinsic,
+        #                 gt_camera_intrinsic, gt_homography_matrix,
+        #                 gt_project_matrix, img_metas)
+        outs_3d = self.pts_bbox_head_3d(pts_feats, img_metas)
+        losses, pos_inds_list, pos_assigned_gt_inds, num_total_pos = self.pts_bbox_head_3d.loss(
             gt_3dlanes, outs_3d, img_metas=img_metas)
-        losses.update(loss)
         lc_assign_results = dict(
             pos_inds=pos_inds_list[-1],
             pos_assigned_gt_inds=pos_assigned_gt_inds[-1],
@@ -745,8 +522,6 @@ class Topo2D(MVXTwoStageDetector):
                 outs_3d['outs_dec'], # o2_feats
                 outs_3d['all_pts_preds'], # o1_pos
                 outs_3d['all_pts_preds'], # o2_pos
-                outs_dec_2d,
-                outs_dec_2d,
             )
             loss = self.topo_ll_head.loss(
                 lclc_preds_list, 
@@ -781,7 +556,6 @@ class Topo2D(MVXTwoStageDetector):
                 outs_3d['outs_dec'],
                 te_outs_dec_list,
                 gt_project_matrix,
-                outs_dec_2d,
             )
             loss = self.topo_lt_head.loss(
                 lcte_preds_list,
@@ -1062,168 +836,87 @@ class Topo2D(MVXTwoStageDetector):
                     prev_bev=None, rescale=False, **kwargs):
         """Test function"""
         # breakpoint()
-        outs = self.pts_bbox_head(x, lidar_feat, img_metas, prev_bev=prev_bev)
-        outs_dec_2d = outs['query'].clone()
-        outs_dec_2d = outs_dec_2d[:, :, :self.num_vec // 4 * self.num_pts_per_vec]
-
-        # import pdb; pdb.set_trace()
-        bbox_list = self.pts_bbox_head.get_bboxes(
-            outs, img_metas, rescale=rescale)
+        outs_3d = self.pts_bbox_head_3d(x, img_metas)
+            
         
-        # len(bbox_list) == 1
+        self.num_lanes_one2one = self.pts_bbox_head_3d.num_lanes_one2one
+        outs_3d = dict(
+            outs_dec = outs_3d['outs_dec'][:, :, :self.num_lanes_one2one * self.num_pts_per_vec],
+            all_cls_scores = outs_3d['all_cls_scores'][:, :, :self.num_lanes_one2one],
+            all_vis_scores = outs_3d['all_vis_scores'][:, :, :self.num_lanes_one2one],
+            all_bbox_preds = outs_3d['all_bbox_preds'][:, :, :self.num_lanes_one2one],
+            all_pts_preds = outs_3d['all_pts_preds'][:, :, :self.num_lanes_one2one],
+        )
+
+        bbox_list = self.pts_bbox_head_3d.get_bboxes(
+            outs_3d, img_metas, rescale=rescale)
         bbox_results = [
             self.pred2result(bboxes, scores, labels, pts, vis)
             for bboxes, scores, labels, pts, vis in bbox_list
         ]
-            
-        if not self.only_2d:
-            outs_3d = self.forward_pts_train_3d(outs, x, kwargs['gt_camera_extrinsic'],
-                            kwargs['gt_camera_intrinsic'], kwargs['gt_homography_matrix'],
-                            kwargs['gt_project_matrix'], img_metas)
-            
-            self.num_lanes_one2one = self.pts_bbox_head_3d.num_lanes_one2one
-            # breakpoint()
-            outs_3d = dict(
-                outs_dec = outs_3d['outs_dec'][:, :, :self.num_lanes_one2one * self.num_pts_per_vec],
-                all_cls_scores = outs_3d['all_cls_scores'][:, :, :self.num_lanes_one2one],
-                all_vis_scores = outs_3d['all_vis_scores'][:, :, :self.num_lanes_one2one],
-                all_bbox_preds = outs_3d['all_bbox_preds'][:, :, :self.num_lanes_one2one],
-                all_pts_preds = outs_3d['all_pts_preds'][:, :, :self.num_lanes_one2one],
-                # all_ref_pts = outs_3d['all_ref_pts'][:, :, :self.num_lanes_one2one * self.num_pts_per_vec],
-            )
 
-            bbox_list = self.pts_bbox_head_3d.get_bboxes(
-                outs_3d, img_metas, rescale=rescale)
+        if self.lane_topo:
+            # bs, lc, lc, 1
+            lclc_preds_list = self.topo_ll_head(
+                outs_3d['outs_dec'], # o1_feats
+                outs_3d['outs_dec'], # o2_feats
+                outs_3d['all_pts_preds'], # o1_pos
+                outs_3d['all_pts_preds'], # o2_pos
+            )
+            bbox_list = self.pts_bbox_head_3d.get_bboxes_topo(
+                outs_3d, lclc_preds_list, img_metas, rescale=rescale)
             bbox_results = [
-                self.pred2result(bboxes, scores, labels, pts, vis)
-                for bboxes, scores, labels, pts, vis in bbox_list
+                self.pred2result(bboxes, scores, labels, pts, vis, topo_lclc)
+                for bboxes, scores, labels, pts, vis, topo_lclc in bbox_list
             ]
 
-            if self.lane_topo:
-                # bs, lc, lc, 1
-                lclc_preds_list = self.topo_ll_head(
-                    outs_3d['outs_dec'], # o1_feats
-                    outs_3d['outs_dec'], # o2_feats
-                    outs_3d['all_pts_preds'], # o1_pos
-                    outs_3d['all_pts_preds'], # o2_pos
-                    outs_dec_2d,
-                    outs_dec_2d,
-                )
-                bbox_list = self.pts_bbox_head_3d.get_bboxes_topo(
-                    outs_3d, lclc_preds_list, img_metas, rescale=rescale)
-                bbox_results = [
-                    self.pred2result(bboxes, scores, labels, pts, vis, topo_lclc)
-                    for bboxes, scores, labels, pts, vis, topo_lclc in bbox_list
-                ]
+        if self.traffic:
+            pv_feat = []
+            for img_feat in x:
+                B, N, output_dim, ouput_H, output_W = img_feat.shape
+                pv_feat.append(img_feat[:, 0, ...])
+            te_img_metas = [{
+                'batch_input_shape': (img_metas[b]['img_shape'][0][0], img_metas[b]['img_shape'][0][1]),
+                'img_shape': img_metas[b]['img_shape'][0],
+                'scale_factor': img_metas[b]['scale_factor'],
+            } for b in range(B)]
+            all_te_cls_scores_list, all_te_preds_list, te_outs_dec_list = self.te_head(pv_feat, te_img_metas)
+            # len(pred_te) = bs = 1
+            # pred_te[0] = (box, score), box = (x1, y1, x2, y2, label)
+            pred_te = self.te_head.get_bboxes(
+                all_te_cls_scores_list, all_te_preds_list, te_img_metas, rescale=rescale)
 
-            if self.traffic:
-                pv_feat = []
-                for img_feat in x:
-                    B, N, output_dim, ouput_H, output_W = img_feat.shape
-                    pv_feat.append(img_feat[:, 0, ...])
-                te_img_metas = [{
-                    'batch_input_shape': (img_metas[b]['img_shape'][0][0], img_metas[b]['img_shape'][0][1]),
-                    'img_shape': img_metas[b]['img_shape'][0],
-                    'scale_factor': img_metas[b]['scale_factor'],
-                } for b in range(B)]
-                all_te_cls_scores_list, all_te_preds_list, te_outs_dec_list = self.te_head(pv_feat, te_img_metas)
-                # len(pred_te) = bs = 1
-                # pred_te[0] = (box, score), box = (x1, y1, x2, y2, label)
-                pred_te = self.te_head.get_bboxes(
-                    all_te_cls_scores_list, all_te_preds_list, te_img_metas, rescale=rescale)
-
-                # import mmcv
-                # from ...datasets.openlane_v2 import render_corner_rectangle
-                # image = mmcv.imread(img_metas[0]['img_paths'][0])
-                # for bbox, score in zip(pred_te[0][0][:, :4], pred_te[0][1]):
-                #     if score < 0.2:
-                #         continue
-                #     b = bbox.astype(np.int32)
-                #     image = render_corner_rectangle(image, (b[0], b[1]), (b[2], b[3]), (255, 0, 0), 3, 1)
-                # for bbox, score in zip(kwargs['gt_te'][0], kwargs['gt_te_labels'][0]):
-                #     bbox = bbox.cpu().numpy()
-                #     score = score.cpu().numpy()
-                #     b = bbox.astype(np.int32)
-                #     image = render_corner_rectangle(image, (b[0], b[1]), (b[2], b[3]), (0, 255, 0), 3, 1)
-                # cv2.imwrite('./test.jpg', image)
-                
-                # bs, lc, te, 1
-                lcte_preds_list = self.topo_lt_head(
-                    outs_3d['outs_dec'],
-                    te_outs_dec_list,
-                    kwargs['gt_project_matrix'],
-                    outs_dec_2d,
-                )
-                bbox_list = self.pts_bbox_head_3d.get_bboxes_topo_traffic(
-                    outs_3d, lclc_preds_list, lcte_preds_list, img_metas, rescale=rescale)
-                bbox_results = [
-                    self.pred2result(bboxes, scores, labels, pts, vis, topo_lclc, topo_lcte)
-                    for bboxes, scores, labels, pts, vis, topo_lclc, topo_lcte in bbox_list
-                ]
-                # te
-                for idx, re in enumerate(bbox_results):
-                    re['pred_te'] = pred_te[idx] # .cpu().numpy()
-            # return None, bbox_results, None, outs_3d['all_ref_pts']
-            return None, bbox_results, None, None
-        return None, bbox_results, None, None
-
-    def visualize(self, bbox_list=None, img_metas=None, ref_pts=None, **kwargs):
-        # visualize openlanev2 3d pred results
-        # breakpoint()
-        batch_idx, direction = 0, 0
-        scale = 25
-        ylim = (self.pc_range[3] - self.pc_range[0]) // scale
-        xlim = (self.pc_range[4] - self.pc_range[1]) // scale
-        plt.figure(figsize=(xlim, ylim))
-        plt.ylim(self.pc_range[0], self.pc_range[3])
-        plt.xlim(self.pc_range[1], self.pc_range[4])
-        plt.axis('off')
-        gt_lines_instance = kwargs['gt_3dlanes'][batch_idx].cpu().numpy()
-        pred_lanes = bbox_list[batch_idx]['pts_3d'].cpu().numpy()
-        pred_score = bbox_list[batch_idx]['scores_3d'] # 50
-        # ref_pts = inverse_sigmoid(ref_pts)
-        # ego
-        plt.arrow(0., 0., 0., 1., head_width=1, head_length=1.5, color='blue')
-        for gt_line_instance in gt_lines_instance:
-            y = gt_line_instance[direction, :, 0] # y = x
-            x = -gt_line_instance[direction, :, 1] # x = -y
-            plt.plot(x, y, color='orange', linewidth=1, alpha=0.8, zorder=-1)
-            # centerline direction
-            plt.arrow(x[-2], y[-2], x[-1] - x[-2], y[-1] - y[-2], head_width=1, head_length=1.5, color='orange')
-            plt.scatter(x, y, color='orange', s=1, alpha=0.8, zorder=-1)
-
-        # for index, pred_line_instance in enumerate(pred_lanes):
-        #     if pred_score[index] < 0.3:
-        #         break
-        #     y = pred_line_instance[:, 0] # y = x
-        #     x = -pred_line_instance[:, 1] # x = -y
-        #     plt.plot(x, y, color='r', linewidth=1, alpha=0.8, zorder=-1)
-        #     # centerline direction
-        #     plt.arrow(x[-2], y[-2], x[-1] - x[-2], y[-1] - y[-2], head_width=1, head_length=1.5, color='red')
-        #     plt.scatter(x, y, color='r', s=1, alpha=0.8, zorder=-1)
-        for index in range(140):
-            # if pred_score[index] < 0.3:
-            #     break
-            # breakpoint()
-            # [layers: bs: vec*pts: 3]
-            # y = pred_line_instance[:, 0] # y = x
-            # x = -pred_line_instance[:, 1] # x = -y
-            y = ref_pts[-1, 0, index*11:index*11+11, 0].cpu().numpy()  *(self.pc_range[3] -
-                            self.pc_range[0]) + self.pc_range[0]  # y = x
-            x = -(ref_pts[-1, 0, index*11:index*11+11, 1].cpu().numpy()  *(self.pc_range[4] -
-                            self.pc_range[1]) + self.pc_range[1])# x = -y
-            plt.plot(x, y, color='r', linewidth=1, alpha=0.8, zorder=-1)
-            # centerline direction
-            plt.arrow(x[-2], y[-2], x[-1] - x[-2], y[-1] - y[-2], head_width=1, head_length=1.5, color='red')
-            plt.scatter(x, y, color='r', s=1, alpha=0.8, zorder=-1)
-        
-        filename = img_metas[batch_idx]['img_paths'][0].split('/')[-1]
-        filename = filename.replace('jpg', 'png')
-        # breakpoint()
-        dirname = 'test/vis_openlane_v2_centerline/pred_bev'
-        os.makedirs(dirname, exist_ok=True)
-        plt.savefig(os.path.join(dirname, filename), bbox_inches='tight', format='png', dpi=1200)
-        plt.close()
+            # import mmcv
+            # from ...datasets.openlane_v2 import render_corner_rectangle
+            # image = mmcv.imread(img_metas[0]['img_paths'][0])
+            # for bbox, score in zip(pred_te[0][0][:, :4], pred_te[0][1]):
+            #     if score < 0.2:
+            #         continue
+            #     b = bbox.astype(np.int32)
+            #     image = render_corner_rectangle(image, (b[0], b[1]), (b[2], b[3]), (255, 0, 0), 3, 1)
+            # for bbox, score in zip(kwargs['gt_te'][0], kwargs['gt_te_labels'][0]):
+            #     bbox = bbox.cpu().numpy()
+            #     score = score.cpu().numpy()
+            #     b = bbox.astype(np.int32)
+            #     image = render_corner_rectangle(image, (b[0], b[1]), (b[2], b[3]), (0, 255, 0), 3, 1)
+            # cv2.imwrite('./test.jpg', image)
+            
+            # bs, lc, te, 1
+            lcte_preds_list = self.topo_lt_head(
+                outs_3d['outs_dec'],
+                te_outs_dec_list,
+                kwargs['gt_project_matrix'],
+            )
+            bbox_list = self.pts_bbox_head_3d.get_bboxes_topo_traffic(
+                outs_3d, lclc_preds_list, lcte_preds_list, img_metas, rescale=rescale)
+            bbox_results = [
+                self.pred2result(bboxes, scores, labels, pts, vis, topo_lclc, topo_lcte)
+                for bboxes, scores, labels, pts, vis, topo_lclc, topo_lcte in bbox_list
+            ]
+            # te
+            for idx, re in enumerate(bbox_results):
+                re['pred_te'] = pred_te[idx] # .cpu().numpy()
+        return None, bbox_results, None
     
     def simple_test(self, img_metas, img=None, points=None, prev_bev=None, rescale=False, **kwargs):
         """Test function without augmentaiton."""
@@ -1240,7 +933,7 @@ class Topo2D(MVXTwoStageDetector):
         # vis 2d
         # bbox_list = [dict() for i in range(len(img_metas[0]['img_paths']))] # cam num
         # import pdb; pdb.set_trace()
-        _, bbox_pts, attn_map, ref_pts = self.simple_test_pts(img_feats, lidar_feat, 
+        _, bbox_pts, attn_map = self.simple_test_pts(img_feats, lidar_feat, 
                         img_metas, prev_bev, rescale=rescale, **kwargs)
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
@@ -1254,7 +947,4 @@ class Topo2D(MVXTwoStageDetector):
         #     self.visualize_attention_map(attn_map, img)
         # if self.vis_attn_map:
         #     self.visualize_attention_map(attn_map, img_metas)
-        # breakpoint()
-        # if img_metas[0]['sample_idx'] == '315969904399927214':
-        #     self.visualize(bbox_pts, img_metas, ref_pts, **kwargs)
         return bbox_list
